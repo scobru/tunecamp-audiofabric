@@ -20687,14 +20687,95 @@ const createRenderBloom = require('./render-bloom')
 const createRenderBlur = require('./render-blur')
 const createRenderGrid = require('./render-grid')
 
+// ─── TuneCamp Lab integration ─────────────────────────────────────────────────
+// Supports three sources (in priority order):
+//  1. Subsonic URL params: ?tc=https://my-tunecamp.com&u=user&p=pass
+//  2. TuneCamp Lab SDK PostMessage bridge (getLibrary action)
+//  3. Built-in royalty-free demo tracks (SoundHelix)
+
+var DEMO_TRACKS = [
+  { title: 'SoundHelix Song 1', artist: 'SoundHelix', path: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3' },
+  { title: 'SoundHelix Song 2', artist: 'SoundHelix', path: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3' },
+  { title: 'SoundHelix Song 3', artist: 'SoundHelix', path: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3' },
+  { title: 'SoundHelix Song 4', artist: 'SoundHelix', path: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3' },
+  { title: 'SoundHelix Song 5', artist: 'SoundHelix', path: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3' }
+]
+
+// Resolve tracks from TuneCamp, calling `done(tracks)` when ready.
+function loadTracks (done) {
+  // 1 — Subsonic via URL query params: ?tc=SERVER&u=USER&p=PASS
+  var params = new URLSearchParams(window.location.search)
+  var tcServer = params.get('tc')
+  var tcUser = params.get('u')
+  var tcPass = params.get('p')
+
+  if (tcServer && tcUser && tcPass) {
+    var base = tcServer.replace(/\/$/, '')
+    var auth = 'u=' + encodeURIComponent(tcUser) +
+      '&p=' + encodeURIComponent(tcPass) +
+      '&v=1.16.1&c=audiofabric&f=json'
+    fetch(base + '/rest/getRandomSongs.view?' + auth + '&size=20')
+      .then(function (r) { return r.json() })
+      .then(function (data) {
+        var sub = data['subsonic-response']
+        if (sub && sub.status === 'ok' && sub.randomSongs && sub.randomSongs.song) {
+          done(sub.randomSongs.song.map(function (s) {
+            return {
+              title: s.title || 'Unknown',
+              artist: s.artist || 'Unknown',
+              path: base + '/rest/stream.view?' + auth + '&id=' + s.id
+            }
+          }))
+        } else {
+          done(DEMO_TRACKS)
+        }
+      })
+      .catch(function () { done(DEMO_TRACKS) })
+    return
+  }
+
+  // 2 — TuneCamp Lab SDK PostMessage bridge (getLibrary)
+  // Falls back to demo tracks after 2 s if TuneCamp doesn't respond.
+  var fallbackTimer = setTimeout(function () {
+    window.removeEventListener('message', onMessage)
+    done(DEMO_TRACKS)
+  }, 2000)
+
+  function onMessage (event) {
+    if (!event.data || event.data.type !== 'tunecamp:response') return
+    var payload = event.data.payload
+    if (!payload || !payload.tracks || !payload.tracks.length) return
+    clearTimeout(fallbackTimer)
+    window.removeEventListener('message', onMessage)
+    done(payload.tracks.map(function (t) {
+      return {
+        title: t.title || 'Unknown',
+        artist: t.artist || 'Unknown',
+        path: t.streamUrl || t.url || t.path || ''
+      }
+    }))
+  }
+
+  window.addEventListener('message', onMessage)
+
+  try {
+    window.parent.postMessage(
+      { type: 'tunecamp:request', action: 'getLibrary', payload: { limit: 20 } },
+      '*'
+    )
+  } catch (e) {
+    // Not inside an iFrame — skip to demo tracks immediately
+    clearTimeout(fallbackTimer)
+    window.removeEventListener('message', onMessage)
+    done(DEMO_TRACKS)
+  }
+}
+
+// ─── App setup (deferred until tracks are resolved) ───────────────────────────
+
 const titleCard = createTitleCard()
 const canvas = document.querySelector('canvas.viz')
 const resize = fit(canvas)
-window.addEventListener('resize', () => {
-  resize()
-  if (hasSetUp) setup()
-  titleCard.resize()
-}, false)
 const camera = createCamera(canvas, [2.5, 2.5, 2.5], [0, 0, 0])
 const regl = createRegl(canvas)
 
@@ -20703,9 +20784,7 @@ let analyser, delaunay, points, positions, positionsBuffer, renderFrequencies,
 
 const getFrameBuffer = (width, height) => (
   regl.framebuffer({
-    color: regl.texture({
-      shape: [width, height, 4]
-    }),
+    color: regl.texture({ shape: [width, height, 4] }),
     depth: false,
     stencil: false
   })
@@ -20713,66 +20792,13 @@ const getFrameBuffer = (width, height) => (
 
 const fbo = getFrameBuffer(512, 512)
 const freqMapFBO = getFrameBuffer(512, 512)
-
 const renderToFBO = regl({ framebuffer: fbo })
 const renderToFreqMapFBO = regl({ framebuffer: freqMapFBO })
-
 const renderBloom = createRenderBloom(regl, canvas)
 const renderBlur = createRenderBlur(regl)
 
-const tracks = [
-  {title: '715 - CRΣΣKS', artist: 'Bon Iver', path: 'src/audio/715-creeks.mp3'},
-  {title: 'Another New World', artist: 'Punch Brothers', path: 'src/audio/another-new-world.mp3'},
-  {title: 'The Wilder Sun', artist: 'Jon Hopkins', path: 'src/audio/the-wilder-sun.mp3'},
-  {title: 'Lost It To Trying', artist: 'Son Lux', path: 'src/audio/lost-it-to-trying.mp3'},
-  {title: 'Adagio for Strings', artist: 'Samuel Barber', path: 'src/audio/adagio-for-strings.mp3'}
-]
-
-const audio = createPlayer(tracks[0].path)
-audio.on('load', function () {
-  window.audio = audio
-  analyser = createAnalyser(audio.node, audio.context, { audible: true, stereo: false })
-  const audioControls = createAudioControls(audio.element, tracks)
-
-  function loop () {
-    window.requestAnimationFrame(loop)
-    audioControls.tick()
-  }
-
-  analyser.analyser.fftSize = 1024 * 2
-  analyser.analyser.minDecibels = -75
-  analyser.analyser.maxDecibels = -30
-  analyser.analyser.smoothingTimeConstant = 0.5
-
-  setup()
-
-  // stupid hack: the first render causes a flash of black on the page,
-  // this just forces it to happen at the start of the app, instead of when
-  // the music starts, which is jarring
-  const renderLoop = startLoop()
-  setTimeout(renderLoop.cancel.bind(renderLoop), 1000)
-
-  titleCard.show()
-    .then(() => new Promise(resolve => setTimeout(resolve, 1000)))
-    .then(() => {
-      css(audioControls.el, {
-        transition: 'opacity 1s linear',
-        opacity: 1
-      })
-      css(gui.domElement.parentElement, {
-        transition: 'opacity 1s linear',
-        opacity: 1
-      })
-      window.requestAnimationFrame(loop)
-      audio.play()
-      camera.start()
-      startLoop()
-    })
-})
-
 const settings = {
   seed: 0,
-
   points: 2500,
   dampening: 0.7,
   stiffness: 0.55,
@@ -20782,27 +20808,21 @@ const settings = {
   connectedBinsStride: 1,
   blurAngle: 0.25,
   blurMag: 7,
-
   blurRadius: 3,
   blurWeight: 0.8,
   originalWeight: 1.2,
-
   gridLines: 180,
   linesDampening: 0.02,
   linesStiffness: 0.9,
   linesAnimationOffset: 12,
   gridMaxHeight: 0.28,
-
   motionBlur: true,
   motionBlurAmount: 0.45
 }
 
 const gui = new GUI()
 gui.closed = true
-css(gui.domElement.parentElement, {
-  zIndex: 11,
-  opacity: 0
-})
+css(gui.domElement.parentElement, { zIndex: 11, opacity: 0 })
 const fabricGUI = gui.addFolder('fabric')
 fabricGUI.add(settings, 'dampening', 0.01, 1).step(0.01).onChange(setup)
 fabricGUI.add(settings, 'stiffness', 0.01, 1).step(0.01).onChange(setup)
@@ -20816,10 +20836,54 @@ const gridGUI = gui.addFolder('grid')
 gridGUI.add(settings, 'gridLines', 10, 300).step(1).onChange(setup)
 gridGUI.add(settings, 'linesAnimationOffset', 0, 100).step(1)
 gridGUI.add(settings, 'gridMaxHeight', 0.01, 0.8).step(0.01)
-// gui.add(settings, 'motionBlur')
-// gui.add(settings, 'motionBlurAmount', 0.01, 1).step(0.01)
 
 let hasSetUp = false
+
+// Resize handler — needs setup() reference, registered after init
+window.addEventListener('resize', () => {
+  resize()
+  if (hasSetUp) setup()
+  titleCard.resize()
+}, false)
+
+// ─── Boot: resolve tracks then start audio + visualisation ────────────────────
+loadTracks(function (tracks) {
+  const audio = createPlayer(tracks[0].path)
+  audio.on('load', function () {
+    window.audio = audio
+    analyser = createAnalyser(audio.node, audio.context, { audible: true, stereo: false })
+    const audioControls = createAudioControls(audio.element, tracks)
+
+    function loop () {
+      window.requestAnimationFrame(loop)
+      audioControls.tick()
+    }
+
+    analyser.analyser.fftSize = 1024 * 2
+    analyser.analyser.minDecibels = -75
+    analyser.analyser.maxDecibels = -30
+    analyser.analyser.smoothingTimeConstant = 0.5
+
+    setup()
+
+    const renderLoop = startLoop()
+    setTimeout(renderLoop.cancel.bind(renderLoop), 1000)
+
+    titleCard.show()
+      .then(() => new Promise(resolve => setTimeout(resolve, 1000)))
+      .then(() => {
+        css(audioControls.el, { transition: 'opacity 1s linear', opacity: 1 })
+        css(gui.domElement.parentElement, { transition: 'opacity 1s linear', opacity: 1 })
+        window.requestAnimationFrame(loop)
+        audio.play()
+        camera.start()
+        startLoop()
+      })
+  })
+})
+
+// ─── Visualisation logic (unchanged) ─────────────────────────────────────────
+
 function setup () {
   hasSetUp = true
   const rand = new Alea(settings.seed)
@@ -20827,18 +20891,13 @@ function setup () {
 
   blurredFbo = getFrameBuffer(canvas.width, canvas.height)
   renderToBlurredFBO = regl({ framebuffer: blurredFbo })
-
   renderGrid = createRenderGrid(regl, settings)
 
-  // fill up the points list with the freqency-tracking nodes
-  const frequenciesCount = analyser.frequencies().length // 1024
+  const frequenciesCount = analyser.frequencies().length
   for (let q = 0; q < frequenciesCount; q += settings.connectedBinsStride) {
     const mag = Math.pow(rand(), 1 - q / frequenciesCount) * 0.9
     const rads = rand() * Math.PI * 2
-    const position = [
-      Math.cos(rads) * mag,
-      Math.sin(rads) * mag
-    ]
+    const position = [Math.cos(rads) * mag, Math.sin(rads) * mag]
     const id = points.length
     const point = createPoint(id, position)
     point.frequencyBin = q
@@ -20854,7 +20913,7 @@ function setup () {
     return {
       position: position,
       id: id,
-      neighbors: new Set(), // gonna fill this up with the results of delaunay
+      neighbors: new Set(),
       spring: createSpring(settings.dampening * settings.stiffness, settings.stiffness, 0)
     }
   }
@@ -20864,7 +20923,6 @@ function setup () {
     const pt1 = delaunay.triangles[j]
     const pt2 = delaunay.triangles[j + 1]
     const pt3 = delaunay.triangles[j + 2]
-
     points[pt1].neighbors.add(pt2)
     points[pt1].neighbors.add(pt3)
     points[pt2].neighbors.add(pt1)
@@ -20881,11 +20939,9 @@ function setup () {
   positionsBuffer = regl.buffer(positions)
 
   renderFrequencies = regl({
-    vert: glsl(["#define GLSLIFY 1\n\n      attribute vec3 position;\n\n      varying vec4 fragColor;\n\n      void main() {\n        float actualIntensity = position.z * 1.2;\n        fragColor = vec4(vec3(actualIntensity), 1);\n        gl_Position = vec4(position.xy, 0, 1);\n      }\n    ",""]),
+    vert: glsl(["#define GLSLIFY 1\n\n      attribute vec3 position;\n      varying vec4 fragColor;\n      void main() {\n        float actualIntensity = position.z * 1.2;\n        fragColor = vec4(vec3(actualIntensity), 1);\n        gl_Position = vec4(position.xy, 0, 1);\n      }\n    ",""]),
     frag: glsl(["\n      precision highp float;\n#define GLSLIFY 1\n\n      varying vec4 fragColor;\n      void main() {\n        gl_FragColor = fragColor;\n      }\n    ",""]),
-    attributes: {
-      position: positionsBuffer
-    },
+    attributes: { position: positionsBuffer },
     count: delaunay.triangles.length,
     primitive: 'triangles'
   })
@@ -20896,7 +20952,7 @@ function update () {
   points.forEach(pt => {
     let value = 0
     if (pt.frequencyBin || pt.frequencyBin === 0) {
-      value = Math.pow(frequencies[pt.frequencyBin] / 255, settings.freqPow) // max bin value
+      value = Math.pow(frequencies[pt.frequencyBin] / 255, settings.freqPow)
     }
     const neighbors = pt.neighbors
     const neighborSum = neighbors.reduce((total, ptID) => {
@@ -20904,7 +20960,6 @@ function update () {
     }, 0)
     const neighborAverage = neighbors.length ? neighborSum / neighbors.length : 0
     value = Math.max(value, neighborAverage * settings.neighborWeight)
-
     pt.spring.updateValue(value)
     pt.spring.tick()
   })
@@ -20916,18 +20971,13 @@ function update () {
     positions[j * 3 + 1] = point.position[1]
     positions[j * 3 + 2] = point.spring.tick(1, false)
   }
-
   positionsBuffer(positions)
 }
 
 const renderGlobals = regl({
   uniforms: {
     projection: ({viewportWidth, viewportHeight}) => mat4.perspective(
-      [],
-      Math.PI / 4,
-      viewportWidth / viewportHeight,
-      0.01,
-      1000
+      [], Math.PI / 4, viewportWidth / viewportHeight, 0.01, 1000
     ),
     view: () => camera.getMatrix(),
     time: ({ time }) => time
@@ -20935,31 +20985,15 @@ const renderGlobals = regl({
 })
 
 const renderColoredQuad = regl({
-  vert: glsl(["\n    precision highp float;\n#define GLSLIFY 1\n\n    attribute vec2 position;\n    void main() {\n      gl_Position = vec4(position, 0, 1);\n    }\n  ",""]),
-  frag: glsl(["\n    precision highp float;\n#define GLSLIFY 1\n\n    uniform vec4 color;\n    void main () {\n      gl_FragColor = color;\n    }\n  ",""]),
+  vert: glsl(["\n    precision highp float;\n#define GLSLIFY 1\n\n    attribute vec2 position;\n    void main() { gl_Position = vec4(position, 0, 1); }\n  ",""]),
+  frag: glsl(["\n    precision highp float;\n#define GLSLIFY 1\n\n    uniform vec4 color;\n    void main () { gl_FragColor = color; }\n  ",""]),
   blend: {
     enable: true,
-    func: {
-      srcRGB: 'src alpha',
-      srcAlpha: 1,
-      dstRGB: 'one minus src alpha',
-      dstAlpha: 1
-    },
-    equation: {
-      rgb: 'add',
-      alpha: 'add'
-    }
+    func: { srcRGB: 'src alpha', srcAlpha: 1, dstRGB: 'one minus src alpha', dstAlpha: 1 },
+    equation: { rgb: 'add', alpha: 'add' }
   },
-  uniforms: {
-    color: regl.prop('color')
-  },
-  attributes: {
-    position: [
-      -1, -1,
-      -1, 4,
-      4, -1
-    ]
-  },
+  uniforms: { color: regl.prop('color') },
+  attributes: { position: [-1, -1, -1, 4, 4, -1] },
   count: 3,
   primitive: 'triangles'
 })
@@ -20968,38 +21002,24 @@ function startLoop () {
   return regl.frame(({ time }) => {
     camera.tick({ time })
     update()
-    renderToFBO(() => {
-      renderFrequencies()
-    })
+    renderToFBO(() => { renderFrequencies() })
     renderToFreqMapFBO(() => {
       const rads = settings.blurAngle * Math.PI
-      const direction = [
-        Math.cos(rads) * settings.blurMag,
-        Math.sin(rads) * settings.blurMag
-      ]
       renderBlur({
         iChannel0: fbo,
-        direction: direction
+        direction: [Math.cos(rads) * settings.blurMag, Math.sin(rads) * settings.blurMag]
       })
     })
     renderToBlurredFBO(() => {
       if (settings.motionBlur) {
         renderColoredQuad({ color: [0.18, 0.18, 0.18, settings.motionBlurAmount] })
       } else {
-        regl.clear({
-          color: [0.18, 0.18, 0.18, 1],
-          depth: 1
-        })
+        regl.clear({ color: [0.18, 0.18, 0.18, 1], depth: 1 })
       }
       renderGlobals(() => {
-        renderGrid({
-          frequencyVals: freqMapFBO,
-          gridMaxHeight: settings.gridMaxHeight,
-          multiplier: 1
-        })
+        renderGrid({ frequencyVals: freqMapFBO, gridMaxHeight: settings.gridMaxHeight, multiplier: 1 })
       })
     })
-
     renderBloom({
       iChannel0: blurredFbo,
       blurMag: settings.blurRadius,
