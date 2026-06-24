@@ -48,8 +48,24 @@ module.exports = function createAudioControls (audio, tracks) {
     audio.currentTime = t * audio.duration
   })
 
+  const searchInput = document.querySelector('.search-input')
+  if (searchInput) {
+    searchInput.addEventListener('input', e => {
+      const query = e.target.value.toLowerCase()
+      tracks.forEach(track => {
+        const titleMatch = track.title.toLowerCase().indexOf(query) !== -1
+        const artistMatch = track.artist.toLowerCase().indexOf(query) !== -1
+        if (titleMatch || artistMatch) {
+          track.el.style.display = ''
+        } else {
+          track.el.style.display = 'none'
+        }
+      })
+    })
+  }
+
   window.addEventListener('keypress', (e) => {
-    if (e.key === ' ') {
+    if (e.key === ' ' && document.activeElement.tagName !== 'INPUT') {
       togglePlay()
     }
   })

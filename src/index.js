@@ -1,3 +1,4 @@
+/* global URLSearchParams, fetch */
 const createRegl = require('regl')
 const glsl = require('glslify')
 const mat4 = require('gl-mat4')
@@ -179,7 +180,7 @@ window.addEventListener('resize', () => {
 
 // ─── Boot: resolve tracks then start audio + visualisation ────────────────────
 loadTracks(function (tracks) {
-  const audio = createPlayer(tracks[0].path)
+  const audio = createPlayer(tracks[0].path, { crossOrigin: 'anonymous' })
   audio.on('load', function () {
     window.audio = audio
     analyser = createAnalyser(audio.node, audio.context, { audible: true, stereo: false })
