@@ -20751,6 +20751,36 @@ function loadTracks (done) {
     return
   }
 
+  // 1b — Same-origin TuneCamp auto-detection via localStorage JWT
+  // When audiofabric is opened in a new tab from TuneCamp's Lab page
+  // (same origin), it can read the JWT session token from localStorage
+  // and stream directly via the Subsonic API.
+  var localToken = null
+  try { localToken = window.localStorage.getItem('tunecamp_token') } catch (e) { /* sandboxed */ }
+  if (localToken) {
+    var autoBase = window.location.origin
+    var autoAuth = 'u=_&p=' + encodeURIComponent(localToken) +
+      '&v=1.16.1&c=audiofabric&f=json'
+    fetch(autoBase + '/rest/getRandomSongs.view?' + autoAuth + '&size=20')
+      .then(function (r) { return r.json() })
+      .then(function (data) {
+        var sub = data['subsonic-response']
+        if (sub && sub.status === 'ok' && sub.randomSongs && sub.randomSongs.song) {
+          done(sub.randomSongs.song.map(function (s) {
+            return {
+              title: s.title || 'Unknown',
+              artist: s.artist || 'Unknown',
+              path: autoBase + '/rest/stream.view?' + autoAuth + '&id=' + s.id
+            }
+          }))
+        } else {
+          done(DEMO_TRACKS)
+        }
+      })
+      .catch(function () { done(DEMO_TRACKS) })
+    return
+  }
+
   // 2 — TuneCamp Lab SDK PostMessage bridge (getLibrary)
   // Falls back to demo tracks after 2 s if TuneCamp doesn't respond.
   var fallbackTimer = setTimeout(function () {
